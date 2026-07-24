@@ -416,14 +416,56 @@ jobs:
           cp -R "${{ runner.temp }}/safari-unpacked/safari.appex" PlugIns/safari.appex
           codesign --verify --deep --strict --verbose=2 PlugIns/safari.appex
 
-      - name: Configure ad-hoc signing
+      - name: Configure desktop ad-hoc signing
         run: |
+          set -euo pipefail
+
           jq '
             .forceCodeSigning = false
             | .mac = ((.mac // {}) + {"identity":"-", "hardenedRuntime":false})
             | del(.afterSign)
           ' electron-builder.json > electron-builder.json.tmp
           mv electron-builder.json.tmp electron-builder.json
+
+          # The upstream afterPack hook manually signs desktop_proxy with
+          # Bitwarden's private Developer ID certificate, bypassing the
+          # electron-builder identity above. Keep the hook, but make its
+          # codesign invocation ad-hoc and prevent timestamp-server access.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          script = Path("scripts/after-pack.js")
+          source = script.read_text()
+          certificate = "Developer ID Application: Bitwarden Inc"
+
+          if certificate not in source:
+              raise SystemExit(
+                  "Expected Bitwarden Developer ID identity was not found in scripts/after-pack.js"
+              )
+
+          source = source.replace(certificate, "-")
+          source, timestamp_count = re.subn(
+              r"--timestamp(?:=[^\s'\"]+)?",
+              "--timestamp=none",
+              source,
+          )
+          if timestamp_count == 0:
+              raise SystemExit("Expected codesign --timestamp option was not found")
+
+          script.write_text(source)
+          print(
+              f"Configured {script} for ad-hoc signing; "
+              f"updated {timestamp_count} timestamp option(s)"
+          )
+          PY
+
+          grep -Fq 'codesign' scripts/after-pack.js
+          grep -Fq -- '--timestamp=none' scripts/after-pack.js
+          if grep -Fq 'Developer ID Application: Bitwarden Inc' scripts/after-pack.js; then
+            echo 'Developer ID identity remains in scripts/after-pack.js' >&2
+            exit 1
+          fi
 
       - name: Set build number
         shell: pwsh
@@ -548,8 +590,10 @@ jobs:
           cp -R "${{ runner.temp }}/safari-unpacked/safari.appex" PlugIns/safari.appex
           codesign --verify --deep --strict --verbose=2 PlugIns/safari.appex
 
-      - name: Configure beta version and ad-hoc signing
+      - name: Configure beta version and desktop ad-hoc signing
         run: |
+          set -euo pipefail
+
           jq '.version = .version + "-beta"' src/package.json > src/package.json.tmp
           mv src/package.json.tmp src/package.json
           jq '
@@ -558,6 +602,42 @@ jobs:
             | del(.afterSign)
           ' electron-builder.json > electron-builder.json.tmp
           mv electron-builder.json.tmp electron-builder.json
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          script = Path("scripts/after-pack.js")
+          source = script.read_text()
+          certificate = "Developer ID Application: Bitwarden Inc"
+
+          if certificate not in source:
+              raise SystemExit(
+                  "Expected Bitwarden Developer ID identity was not found in scripts/after-pack.js"
+              )
+
+          source = source.replace(certificate, "-")
+          source, timestamp_count = re.subn(
+              r"--timestamp(?:=[^\s'\"]+)?",
+              "--timestamp=none",
+              source,
+          )
+          if timestamp_count == 0:
+              raise SystemExit("Expected codesign --timestamp option was not found")
+
+          script.write_text(source)
+          print(
+              f"Configured {script} for ad-hoc signing; "
+              f"updated {timestamp_count} timestamp option(s)"
+          )
+          PY
+
+          grep -Fq 'codesign' scripts/after-pack.js
+          grep -Fq -- '--timestamp=none' scripts/after-pack.js
+          if grep -Fq 'Developer ID Application: Bitwarden Inc' scripts/after-pack.js; then
+            echo 'Developer ID identity remains in scripts/after-pack.js' >&2
+            exit 1
+          fi
 
       - name: Package ad-hoc signed beta
         run: npm run pack:mac:beta
