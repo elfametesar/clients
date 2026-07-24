@@ -420,29 +420,32 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Sign the base Electron app ad-hoc, but do not put the Safari
+          # extension into electron-builder's signing pass. We inject the
+          # already-signed .appex after the base app has been produced.
           jq '
             .forceCodeSigning = false
-            | .mac = ((.mac // {}) + {"identity":"-", "hardenedRuntime":false})
-            | .mac.extraFiles = (
-                ([.mac.extraFiles] | flatten | map(select(. != null)))
-                + [{"from":"PlugIns", "to":"PlugIns", "filter":["**/*"]}]
+            | .mac = ((.mac // {}) + {
+                "identity":"-",
+                "hardenedRuntime":false,
+                "notarize":false
+              })
+            | del(
+                .provisioningProfile,
+                .mac.provisioningProfile,
+                .mas.provisioningProfile,
+                .masDev.provisioningProfile,
+                .afterSign
               )
-            | del(.provisioningProfile, .mac.provisioningProfile, .mas.provisioningProfile, .afterSign)
           ' electron-builder.json > electron-builder.json.tmp
           mv electron-builder.json.tmp electron-builder.json
 
-          # Ad-hoc signing must not load any Apple provisioning profile. The
-          # Safari extension is copied into Contents/PlugIns before signing.
+          test "$(jq -r '.mac.identity' electron-builder.json)" = "-"
           test "$(jq -r '.mac.provisioningProfile // empty' electron-builder.json)" = ""
-          jq -e '
-            .mac.extraFiles
-            | any(.[]; type == "object" and .from == "PlugIns" and .to == "PlugIns")
-          ' electron-builder.json >/dev/null
 
           # The upstream afterPack hook manually signs desktop_proxy with
-          # Bitwarden's private Developer ID certificate, bypassing the
-          # electron-builder identity above. Keep the hook, but make its
-          # codesign invocation ad-hoc and prevent timestamp-server access.
+          # Bitwarden's private Developer ID certificate. Keep the hook and
+          # its fuse work, but make that one command ad-hoc and offline.
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -458,7 +461,7 @@ jobs:
 
           source = source.replace(certificate, "-")
           source, timestamp_count = re.subn(
-              r"--timestamp(?:=[^\s'\"]+)?",
+              r"--timestamp(?:=[^\s'\\"]+)?",
               "--timestamp=none",
               source,
           )
@@ -472,7 +475,6 @@ jobs:
           )
           PY
 
-          grep -Fq 'codesign' scripts/after-pack.js
           grep -Fq -- '--timestamp=none' scripts/after-pack.js
           if grep -Fq 'Developer ID Application: Bitwarden Inc' scripts/after-pack.js; then
             echo 'Developer ID identity remains in scripts/after-pack.js' >&2
@@ -488,10 +490,20 @@ jobs:
           $package | Add-Member -Force -MemberType NoteProperty -Name buildVersion -Value "$env:BUILD_NUMBER"
           $package | ConvertTo-Json -Depth 32 | Set-Content -Path electron-builder.json
 
-      - name: Package ad-hoc signed app
-        run: npm run pack:mac
+      - name: Build ad-hoc signed app directory
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          DEBUG: electron-builder
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          ../../node_modules/.bin/electron-builder \
+            --config electron-builder.json \
+            --mac dir \
+            --universal \
+            -p never
 
-      - name: Verify app and bundled extension signatures
+      - name: Inject Safari extension and reseal app
         run: |
           set -euo pipefail
 
@@ -502,17 +514,52 @@ jobs:
             exit 1
           fi
 
-          APPEX=$(find "$APP/Contents/PlugIns" -maxdepth 1 -type d -name '*.appex' -print -quit 2>/dev/null || true)
-          if [[ -z "$APPEX" ]]; then
-            echo "Safari extension was not bundled into $APP/Contents/PlugIns" >&2
-            find "$APP/Contents" -maxdepth 3 -print >&2
-            exit 1
-          fi
+          mkdir -p "$APP/Contents/PlugIns"
+          rm -rf "$APP/Contents/PlugIns/safari.appex"
+          ditto PlugIns/safari.appex "$APP/Contents/PlugIns/safari.appex"
 
-          codesign --verify --deep --strict --verbose=4 "$APPEX"
+          # The extension already carries its own ad-hoc signature and
+          # entitlements. Re-sign only the outer app bundle so its resource
+          # seal includes the newly inserted extension; do not recursively
+          # rewrite the extension's entitlements.
+          codesign --verify --deep --strict --verbose=2 "$APP/Contents/PlugIns/safari.appex"
+          codesign \
+            --force \
+            --sign - \
+            --timestamp=none \
+            --preserve-metadata=identifier,entitlements,requirements,flags \
+            "$APP"
+
           codesign --verify --deep --strict --verbose=4 "$APP"
-          codesign -dv --verbose=4 "$APPEX" 2>&1
+          codesign --verify --deep --strict --verbose=4 "$APP/Contents/PlugIns/safari.appex"
           codesign -dv --verbose=4 "$APP" 2>&1
+          codesign -dv --verbose=4 "$APP/Contents/PlugIns/safari.appex" 2>&1
+
+      - name: Create ZIP and DMG artifacts
+        run: |
+          set -euo pipefail
+
+          APP=$(find dist/mac-universal -maxdepth 1 -type d -name '*.app' -print -quit)
+          ZIP="dist/Bitwarden-${_PACKAGE_VERSION}-universal-mac.zip"
+          DMG="dist/Bitwarden-${_PACKAGE_VERSION}-universal.dmg"
+          STAGE="$RUNNER_TEMP/bitwarden-dmg-stage"
+
+          rm -f "$ZIP" "$DMG"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/$(basename "$APP")"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create \
+            -volname "Bitwarden ${_PACKAGE_VERSION}" \
+            -srcfolder "$STAGE" \
+            -ov \
+            -format UDZO \
+            "$DMG"
+
+          test -s "$ZIP"
+          test -s "$DMG"
 
       - name: Upload ZIP artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -526,20 +573,6 @@ jobs:
         with:
           name: Bitwarden-${{ env._PACKAGE_VERSION }}-universal.dmg
           path: apps/desktop/dist/Bitwarden-${{ env._PACKAGE_VERSION }}-universal.dmg
-          if-no-files-found: error
-
-      - name: Upload DMG blockmap
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: Bitwarden-${{ env._PACKAGE_VERSION }}-universal.dmg.blockmap
-          path: apps/desktop/dist/Bitwarden-${{ env._PACKAGE_VERSION }}-universal.dmg.blockmap
-          if-no-files-found: error
-
-      - name: Upload auto-update metadata
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ needs.setup.outputs.release_channel }}-mac.yml
-          path: apps/desktop/dist/${{ needs.setup.outputs.release_channel }}-mac.yml
           if-no-files-found: error
 
   macos-beta:
@@ -621,26 +654,28 @@ jobs:
 
           jq '.version = .version + "-beta"' src/package.json > src/package.json.tmp
           mv src/package.json.tmp src/package.json
-          # pack:mac:beta loads electron-builder.beta.json, which can override
-          # the base file. Patch both configs so the beta job cannot reintroduce
-          # Bitwarden's private provisioning profile.
+
+          # The beta config extends/overrides the base config, so sanitize both.
           for config in electron-builder.json electron-builder.beta.json; do
             jq '
               .forceCodeSigning = false
-              | .mac = ((.mac // {}) + {"identity":"-", "hardenedRuntime":false})
-              | .mac.extraFiles = (
-                  ([.mac.extraFiles] | flatten | map(select(. != null)))
-                  + [{"from":"PlugIns", "to":"PlugIns", "filter":["**/*"]}]
+              | .mac = ((.mac // {}) + {
+                  "identity":"-",
+                  "hardenedRuntime":false,
+                  "notarize":false
+                })
+              | del(
+                  .provisioningProfile,
+                  .mac.provisioningProfile,
+                  .mas.provisioningProfile,
+                  .masDev.provisioningProfile,
+                  .afterSign
                 )
-              | del(.provisioningProfile, .mac.provisioningProfile, .mas.provisioningProfile, .afterSign)
             ' "$config" > "$config.tmp"
             mv "$config.tmp" "$config"
 
+            test "$(jq -r '.mac.identity' "$config")" = "-"
             test "$(jq -r '.mac.provisioningProfile // empty' "$config")" = ""
-            jq -e '
-              .mac.extraFiles
-              | any(.[]; type == "object" and .from == "PlugIns" and .to == "PlugIns")
-            ' "$config" >/dev/null
           done
 
           python3 - <<'PY'
@@ -658,7 +693,7 @@ jobs:
 
           source = source.replace(certificate, "-")
           source, timestamp_count = re.subn(
-              r"--timestamp(?:=[^\s'\"]+)?",
+              r"--timestamp(?:=[^\s'\\"]+)?",
               "--timestamp=none",
               source,
           )
@@ -672,17 +707,26 @@ jobs:
           )
           PY
 
-          grep -Fq 'codesign' scripts/after-pack.js
           grep -Fq -- '--timestamp=none' scripts/after-pack.js
           if grep -Fq 'Developer ID Application: Bitwarden Inc' scripts/after-pack.js; then
             echo 'Developer ID identity remains in scripts/after-pack.js' >&2
             exit 1
           fi
 
-      - name: Package ad-hoc signed beta
-        run: npm run pack:mac:beta
+      - name: Build ad-hoc signed beta app directory
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          DEBUG: electron-builder
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          ../../node_modules/.bin/electron-builder \
+            --config electron-builder.beta.json \
+            --mac dir \
+            --universal \
+            -p never
 
-      - name: Verify beta app and bundled extension signatures
+      - name: Inject Safari extension and reseal beta app
         run: |
           set -euo pipefail
 
@@ -693,17 +737,48 @@ jobs:
             exit 1
           fi
 
-          APPEX=$(find "$APP/Contents/PlugIns" -maxdepth 1 -type d -name '*.appex' -print -quit 2>/dev/null || true)
-          if [[ -z "$APPEX" ]]; then
-            echo "Safari extension was not bundled into $APP/Contents/PlugIns" >&2
-            find "$APP/Contents" -maxdepth 3 -print >&2
-            exit 1
-          fi
+          mkdir -p "$APP/Contents/PlugIns"
+          rm -rf "$APP/Contents/PlugIns/safari.appex"
+          ditto PlugIns/safari.appex "$APP/Contents/PlugIns/safari.appex"
 
-          codesign --verify --deep --strict --verbose=4 "$APPEX"
+          codesign --verify --deep --strict --verbose=2 "$APP/Contents/PlugIns/safari.appex"
+          codesign \
+            --force \
+            --sign - \
+            --timestamp=none \
+            --preserve-metadata=identifier,entitlements,requirements,flags \
+            "$APP"
+
           codesign --verify --deep --strict --verbose=4 "$APP"
-          codesign -dv --verbose=4 "$APPEX" 2>&1
+          codesign --verify --deep --strict --verbose=4 "$APP/Contents/PlugIns/safari.appex"
           codesign -dv --verbose=4 "$APP" 2>&1
+          codesign -dv --verbose=4 "$APP/Contents/PlugIns/safari.appex" 2>&1
+
+      - name: Create beta ZIP and DMG artifacts
+        run: |
+          set -euo pipefail
+
+          APP=$(find dist/mac-universal -maxdepth 1 -type d -name '*.app' -print -quit)
+          ZIP="dist/Bitwarden-${_PACKAGE_VERSION}-beta-universal-mac.zip"
+          DMG="dist/Bitwarden-${_PACKAGE_VERSION}-beta-universal.dmg"
+          STAGE="$RUNNER_TEMP/bitwarden-beta-dmg-stage"
+
+          rm -f "$ZIP" "$DMG"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/$(basename "$APP")"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create \
+            -volname "Bitwarden Beta ${_PACKAGE_VERSION}" \
+            -srcfolder "$STAGE" \
+            -ov \
+            -format UDZO \
+            "$DMG"
+
+          test -s "$ZIP"
+          test -s "$DMG"
 
       - name: Upload beta ZIP
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -717,13 +792,6 @@ jobs:
         with:
           name: Bitwarden-${{ env._PACKAGE_VERSION }}-beta-universal.dmg
           path: apps/desktop/dist/Bitwarden-${{ env._PACKAGE_VERSION }}-beta-universal.dmg
-          if-no-files-found: error
-
-      - name: Upload beta update metadata
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: beta-mac.yml
-          path: apps/desktop/dist/beta-mac.yml
           if-no-files-found: error
 
   validate-macos-dmg:
