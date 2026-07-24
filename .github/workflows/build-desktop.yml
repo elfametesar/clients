@@ -349,6 +349,15 @@ jobs:
           cache-dependency-path: '**/package-lock.json'
           node-version: ${{ env._NODE_VERSION }}
 
+
+      - name: Cache Electron downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: macos-electron-${{ hashFiles('package-lock.json') }}
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -471,12 +480,27 @@ jobs:
           DEBUG: electron-builder
         run: |
           set -euo pipefail
-          rm -rf dist
-          ../../node_modules/.bin/electron-builder \
-            --config electron-builder.json \
-            --mac dir \
-            --universal \
-            -p never
+
+          for attempt in 1 2 3; do
+            echo "Electron Builder attempt ${attempt}/3"
+            rm -rf dist
+            if ../../node_modules/.bin/electron-builder \
+              --config electron-builder.json \
+              --mac dir \
+              --universal \
+              -p never; then
+              exit 0
+            fi
+
+            if [[ "$attempt" -lt 3 ]]; then
+              delay=$((attempt * 20))
+              echo "Electron download/build failed; retrying in ${delay}s" >&2
+              sleep "$delay"
+            fi
+          done
+
+          echo "Electron Builder failed after three attempts" >&2
+          exit 1
 
       - name: Inject Safari extension and reseal app
         run: |
@@ -572,6 +596,7 @@ jobs:
       - setup
       - macos-build
       - browser-build
+      - macos-package-github
     env:
       _PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
       _NODE_VERSION: ${{ needs.setup.outputs.node_version }}
@@ -593,6 +618,15 @@ jobs:
           cache: npm
           cache-dependency-path: '**/package-lock.json'
           node-version: ${{ env._NODE_VERSION }}
+
+
+      - name: Cache Electron downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: macos-electron-${{ hashFiles('package-lock.json') }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -707,12 +741,27 @@ jobs:
           DEBUG: electron-builder
         run: |
           set -euo pipefail
-          rm -rf dist
-          ../../node_modules/.bin/electron-builder \
-            --config electron-builder.beta.json \
-            --mac dir \
-            --universal \
-            -p never
+
+          for attempt in 1 2 3; do
+            echo "Electron Builder beta attempt ${attempt}/3"
+            rm -rf dist
+            if ../../node_modules/.bin/electron-builder \
+              --config electron-builder.beta.json \
+              --mac dir \
+              --universal \
+              -p never; then
+              exit 0
+            fi
+
+            if [[ "$attempt" -lt 3 ]]; then
+              delay=$((attempt * 20))
+              echo "Electron beta download/build failed; retrying in ${delay}s" >&2
+              sleep "$delay"
+            fi
+          done
+
+          echo "Electron Builder beta failed after three attempts" >&2
+          exit 1
 
       - name: Inject Safari extension and reseal beta app
         run: |
