@@ -78,7 +78,7 @@
   "optional_permissions": ["nativeMessaging", "privacy"],
   "__firefox__optional_permissions": ["nativeMessaging"],
   "__safari__optional_permissions": null,
-  "content_security_policy": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+  "content_security_policy": "script-src 'unsafe-eval' 'self' 'wasm-unsafe-eval'; object-src 'self'",
   "sandbox": {
     "pages": ["overlay/menu-button.html", "overlay/menu-list.html"],
     "content_security_policy": "sandbox allow-scripts; script-src 'self'"
