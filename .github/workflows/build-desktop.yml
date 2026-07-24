@@ -440,26 +440,32 @@ jobs:
           certificate = "Developer ID Application: Bitwarden Inc"
           timestamp_option = "--timestamp --options runtime"
 
-          if certificate not in source:
-              raise SystemExit(
-                  "Expected Bitwarden Developer ID identity was not found in scripts/after-pack.js"
-              )
-          if timestamp_option not in source:
-              raise SystemExit(
-                  "Expected codesign timestamp/runtime options were not found in scripts/after-pack.js"
-              )
+          changed = False
 
-          source = source.replace(certificate, "-")
-          source = source.replace(
-              timestamp_option,
-              "--timestamp=none --options runtime",
-          )
+          # Newer desktop releases hard-code Bitwarden's Developer ID in this
+          # hook. Older releases (including desktop-v2026.2.1) do not. Patch it
+          # only when present instead of treating its absence as an error.
+          if certificate in source:
+              source = source.replace(certificate, "-")
+              changed = True
+              print("Replaced Bitwarden Developer ID identity with ad-hoc identity")
+          else:
+              print("No hard-coded Bitwarden Developer ID identity; no hook identity patch needed")
 
-          script.write_text(source)
-          print(f"Configured {script} for offline ad-hoc signing")
+          if timestamp_option in source:
+              source = source.replace(
+                  timestamp_option,
+                  "--timestamp=none --options runtime",
+              )
+              changed = True
+              print("Disabled timestamping in after-pack hook")
+          else:
+              print("No matching timestamp option; leaving hook timestamp handling unchanged")
+
+          if changed:
+              script.write_text(source)
           PY
 
-          grep -Fq -- '--timestamp=none' scripts/after-pack.js
           if grep -Fq 'Developer ID Application: Bitwarden Inc' scripts/after-pack.js; then
             echo 'Developer ID identity remains in scripts/after-pack.js' >&2
             exit 1
@@ -710,26 +716,32 @@ jobs:
           certificate = "Developer ID Application: Bitwarden Inc"
           timestamp_option = "--timestamp --options runtime"
 
-          if certificate not in source:
-              raise SystemExit(
-                  "Expected Bitwarden Developer ID identity was not found in scripts/after-pack.js"
-              )
-          if timestamp_option not in source:
-              raise SystemExit(
-                  "Expected codesign timestamp/runtime options were not found in scripts/after-pack.js"
-              )
+          changed = False
 
-          source = source.replace(certificate, "-")
-          source = source.replace(
-              timestamp_option,
-              "--timestamp=none --options runtime",
-          )
+          # Newer desktop releases hard-code Bitwarden's Developer ID in this
+          # hook. Older releases (including desktop-v2026.2.1) do not. Patch it
+          # only when present instead of treating its absence as an error.
+          if certificate in source:
+              source = source.replace(certificate, "-")
+              changed = True
+              print("Replaced Bitwarden Developer ID identity with ad-hoc identity")
+          else:
+              print("No hard-coded Bitwarden Developer ID identity; no hook identity patch needed")
 
-          script.write_text(source)
-          print(f"Configured {script} for offline ad-hoc signing")
+          if timestamp_option in source:
+              source = source.replace(
+                  timestamp_option,
+                  "--timestamp=none --options runtime",
+              )
+              changed = True
+              print("Disabled timestamping in after-pack hook")
+          else:
+              print("No matching timestamp option; leaving hook timestamp handling unchanged")
+
+          if changed:
+              script.write_text(source)
           PY
 
-          grep -Fq -- '--timestamp=none' scripts/after-pack.js
           if grep -Fq 'Developer ID Application: Bitwarden Inc' scripts/after-pack.js; then
             echo 'Developer ID identity remains in scripts/after-pack.js' >&2
             exit 1
