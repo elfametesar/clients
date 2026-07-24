@@ -233,21 +233,90 @@ jobs:
         if: ${{ inputs.sdk_branch != '' }}
         run: npm link ../sdk-internal
 
-      - name: Build Safari extension
+      - name: Build Safari extension without Apple provisioning
         working-directory: apps/browser
-        run: npm run dist:safari
-
-      - name: Verify or ad-hoc sign Safari extension
         run: |
+          set -euo pipefail
+
+          # Generate the Safari web-extension payload and Xcode projects first.
+          npm run build:prod:safari
+
+          # Bitwarden's checked-in Xcode project contains its Apple team and
+          # certificate settings. Clear them in both the source and generated
+          # projects so this fork never requests those credentials.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          project_files = sorted(
+              set(Path("src/safari").rglob("project.pbxproj"))
+              | set(Path("dist/Safari").rglob("project.pbxproj"))
+          )
+          if not project_files:
+              raise SystemExit("No Safari Xcode project files were generated")
+
+          replacements = {
+              "DEVELOPMENT_TEAM": '""',
+              "CODE_SIGN_IDENTITY": '""',
+              "PROVISIONING_PROFILE": '""',
+              "PROVISIONING_PROFILE_SPECIFIER": '""',
+          }
+
+          for project in project_files:
+              text = project.read_text()
+              for key, value in replacements.items():
+                  text = re.sub(
+                      rf'(?m)^(\s*)("?{re.escape(key)}(?:\[[^]]+\])?"?)\s*=\s*[^;]*;',
+                      rf'\1\2 = {value};',
+                      text,
+                  )
+              project.write_text(text)
+              print(f"Sanitized signing settings in {project}")
+          PY
+
+          # package-safari.ps1 invokes xcodebuild for both its MAS and DMG
+          # projects. Put a wrapper first in PATH so every invocation compiles
+          # without certificate lookup or provisioning. The resulting .appex
+          # is signed ad-hoc in the next step.
+          XCODE_WRAPPER_DIR="$RUNNER_TEMP/xcodebuild-no-provisioning"
+          mkdir -p "$XCODE_WRAPPER_DIR"
+          cat > "$XCODE_WRAPPER_DIR/xcodebuild" <<'SH'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/xcodebuild "$@" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+          SH
+          chmod +x "$XCODE_WRAPPER_DIR/xcodebuild"
+
+          PATH="$XCODE_WRAPPER_DIR:$PATH" ./scripts/package-safari.ps1
+
+      - name: Ad-hoc sign and verify Safari extension
+        run: |
+          set -euo pipefail
           APPEX="apps/browser/dist/Safari/dmg/build/Release/safari.appex"
           ENTITLEMENTS="apps/browser/src/safari/safari/safari.entitlements"
           test -d "$APPEX"
+          test -f "$ENTITLEMENTS"
 
-          if ! codesign --verify --deep --strict --verbose=2 "$APPEX"; then
-            codesign --force --deep --sign - --entitlements "$ENTITLEMENTS" "$APPEX"
-          fi
+          codesign --remove-signature "$APPEX" 2>/dev/null || true
+          codesign \
+            --force \
+            --deep \
+            --sign - \
+            --timestamp=none \
+            --entitlements "$ENTITLEMENTS" \
+            "$APPEX"
 
           codesign --verify --deep --strict --verbose=2 "$APPEX"
+          codesign -dv --verbose=4 "$APPEX" 2>&1 | tee "$RUNNER_TEMP/safari-signature.txt"
+          grep -q 'Signature=adhoc' "$RUNNER_TEMP/safari-signature.txt"
           ditto -c -k --sequesterRsrc --keepParent "$APPEX" safari-extension.zip
 
       - name: Upload Safari extension
