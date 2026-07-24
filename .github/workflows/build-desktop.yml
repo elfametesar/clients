@@ -423,9 +423,13 @@ jobs:
           jq '
             .forceCodeSigning = false
             | .mac = ((.mac // {}) + {"identity":"-", "hardenedRuntime":false})
-            | del(.afterSign)
+            | del(.mac.provisioningProfile, .mas.provisioningProfile, .afterSign)
           ' electron-builder.json > electron-builder.json.tmp
           mv electron-builder.json.tmp electron-builder.json
+
+          # electron-builder treats any configured provisioning profile as a
+          # mandatory Apple signing asset, even when identity is ad-hoc (`-`).
+          test "$(jq -r '.mac.provisioningProfile // empty' electron-builder.json)" = ""
 
           # The upstream afterPack hook manually signs desktop_proxy with
           # Bitwarden's private Developer ID certificate, bypassing the
@@ -599,9 +603,13 @@ jobs:
           jq '
             .forceCodeSigning = false
             | .mac = ((.mac // {}) + {"identity":"-", "hardenedRuntime":false})
-            | del(.afterSign)
+            | del(.mac.provisioningProfile, .mas.provisioningProfile, .afterSign)
           ' electron-builder.json > electron-builder.json.tmp
           mv electron-builder.json.tmp electron-builder.json
+
+          # electron-builder treats any configured provisioning profile as a
+          # mandatory Apple signing asset, even when identity is ad-hoc (`-`).
+          test "$(jq -r '.mac.provisioningProfile // empty' electron-builder.json)" = ""
 
           python3 - <<'PY'
           from pathlib import Path
