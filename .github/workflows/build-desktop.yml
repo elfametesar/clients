@@ -272,12 +272,30 @@ jobs:
                   )
               project.write_text(text)
               print(f"Sanitized signing settings in {project}")
+
+          # We only need the DMG Safari extension. The upstream packaging script
+          # also builds a Mac App Store target and then re-signs every bundled
+          # Swift dylib with Bitwarden's private Apple certificate. Restrict it
+          # to the DMG target and change that post-build identity to ad-hoc.
+          script = Path("scripts/package-safari.ps1")
+          script_text = script.read_text()
+          script_replacements = {
+              '$subBuildPaths = @("mas", "dmg")': '$subBuildPaths = @("dmg")',
+              '\'"Developer ID Application: Bitwarden Inc"\'': '"-"',
+              '\'"3rd Party Mac Developer Application: Bitwarden Inc"\'': '"-"',
+          }
+          for old, new in script_replacements.items():
+              if old not in script_text:
+                  raise SystemExit(f"Expected Safari packaging token not found: {old}")
+              script_text = script_text.replace(old, new)
+          script.write_text(script_text)
+          print("Configured package-safari.ps1 for DMG-only ad-hoc signing")
           PY
 
-          # package-safari.ps1 invokes xcodebuild for both its MAS and DMG
-          # projects. Put a wrapper first in PATH so every invocation compiles
-          # without certificate lookup or provisioning. The resulting .appex
-          # is signed ad-hoc in the next step.
+          # package-safari.ps1 invokes xcodebuild for its DMG project. Put a
+          # wrapper first in PATH so compilation itself never performs a
+          # certificate lookup or provisioning. The patched PowerShell script
+          # then ad-hoc signs its dylibs and .appex with codesign --sign -.
           XCODE_WRAPPER_DIR="$RUNNER_TEMP/xcodebuild-no-provisioning"
           mkdir -p "$XCODE_WRAPPER_DIR"
           cat > "$XCODE_WRAPPER_DIR/xcodebuild" <<'SH'
