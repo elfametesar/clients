@@ -433,6 +433,7 @@ jobs:
           # Bitwarden's private Developer ID certificate. Keep the hook and
           # its fuse work, but make that one command ad-hoc and offline.
           python3 - <<'PY'
+          import re
           from pathlib import Path
 
           script = Path("scripts/after-pack.js")
@@ -469,15 +470,19 @@ jobs:
           else:
               print("No matching timestamp option; leaving hook timestamp handling unchanged")
 
+          remaining = re.findall(
+              r"""["']Developer ID Application:[^"']+["']""",
+              source,
+          )
+          if remaining:
+              raise SystemExit(
+                  "Complete Developer ID signing identity still present: "
+                  + ", ".join(remaining)
+              )
+
           if changed:
               script.write_text(source)
           PY
-
-          if grep -Fq 'Developer ID Application:' scripts/after-pack.js; then
-            echo 'A Developer ID identity remains in scripts/after-pack.js:' >&2
-            grep -nF 'Developer ID Application:' scripts/after-pack.js >&2
-            exit 1
-          fi
 
       - name: Set build number
         shell: pwsh
@@ -717,6 +722,7 @@ jobs:
           done
 
           python3 - <<'PY'
+          import re
           from pathlib import Path
 
           script = Path("scripts/after-pack.js")
@@ -753,15 +759,19 @@ jobs:
           else:
               print("No matching timestamp option; leaving hook timestamp handling unchanged")
 
+          remaining = re.findall(
+              r"""["']Developer ID Application:[^"']+["']""",
+              source,
+          )
+          if remaining:
+              raise SystemExit(
+                  "Complete Developer ID signing identity still present: "
+                  + ", ".join(remaining)
+              )
+
           if changed:
               script.write_text(source)
           PY
-
-          if grep -Fq 'Developer ID Application:' scripts/after-pack.js; then
-            echo 'A Developer ID identity remains in scripts/after-pack.js:' >&2
-            grep -nF 'Developer ID Application:' scripts/after-pack.js >&2
-            exit 1
-          fi
 
       - name: Build ad-hoc signed beta app directory
         env:
