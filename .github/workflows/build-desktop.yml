@@ -437,20 +437,27 @@ jobs:
 
           script = Path("scripts/after-pack.js")
           source = script.read_text()
-          certificate = "Developer ID Application: Bitwarden Inc"
+          certificates = (
+              "Developer ID Application: Bitwarden Inc",
+              "Developer ID Application: 8bit Solutions LLC",
+          )
           timestamp_option = "--timestamp --options runtime"
 
           changed = False
+          replaced = []
 
-          # Newer desktop releases hard-code Bitwarden's Developer ID in this
-          # hook. Older releases (including desktop-v2026.2.1) do not. Patch it
-          # only when present instead of treating its absence as an error.
-          if certificate in source:
-              source = source.replace(certificate, "-")
-              changed = True
-              print("Replaced Bitwarden Developer ID identity with ad-hoc identity")
+          # Bitwarden changed company/certificate names over time. Replace any
+          # known private Developer ID identity used by the afterPack hook.
+          for certificate in certificates:
+              if certificate in source:
+                  source = source.replace(certificate, "-")
+                  changed = True
+                  replaced.append(certificate)
+
+          if replaced:
+              print("Replaced afterPack signing identities: " + ", ".join(replaced))
           else:
-              print("No hard-coded Bitwarden Developer ID identity; no hook identity patch needed")
+              print("No known hard-coded Developer ID identity found in afterPack hook")
 
           if timestamp_option in source:
               source = source.replace(
@@ -466,8 +473,9 @@ jobs:
               script.write_text(source)
           PY
 
-          if grep -Fq 'Developer ID Application: Bitwarden Inc' scripts/after-pack.js; then
-            echo 'Developer ID identity remains in scripts/after-pack.js' >&2
+          if grep -Fq 'Developer ID Application:' scripts/after-pack.js; then
+            echo 'A Developer ID identity remains in scripts/after-pack.js:' >&2
+            grep -nF 'Developer ID Application:' scripts/after-pack.js >&2
             exit 1
           fi
 
@@ -713,20 +721,27 @@ jobs:
 
           script = Path("scripts/after-pack.js")
           source = script.read_text()
-          certificate = "Developer ID Application: Bitwarden Inc"
+          certificates = (
+              "Developer ID Application: Bitwarden Inc",
+              "Developer ID Application: 8bit Solutions LLC",
+          )
           timestamp_option = "--timestamp --options runtime"
 
           changed = False
+          replaced = []
 
-          # Newer desktop releases hard-code Bitwarden's Developer ID in this
-          # hook. Older releases (including desktop-v2026.2.1) do not. Patch it
-          # only when present instead of treating its absence as an error.
-          if certificate in source:
-              source = source.replace(certificate, "-")
-              changed = True
-              print("Replaced Bitwarden Developer ID identity with ad-hoc identity")
+          # Bitwarden changed company/certificate names over time. Replace any
+          # known private Developer ID identity used by the afterPack hook.
+          for certificate in certificates:
+              if certificate in source:
+                  source = source.replace(certificate, "-")
+                  changed = True
+                  replaced.append(certificate)
+
+          if replaced:
+              print("Replaced afterPack signing identities: " + ", ".join(replaced))
           else:
-              print("No hard-coded Bitwarden Developer ID identity; no hook identity patch needed")
+              print("No known hard-coded Developer ID identity found in afterPack hook")
 
           if timestamp_option in source:
               source = source.replace(
@@ -742,8 +757,9 @@ jobs:
               script.write_text(source)
           PY
 
-          if grep -Fq 'Developer ID Application: Bitwarden Inc' scripts/after-pack.js; then
-            echo 'Developer ID identity remains in scripts/after-pack.js' >&2
+          if grep -Fq 'Developer ID Application:' scripts/after-pack.js; then
+            echo 'A Developer ID identity remains in scripts/after-pack.js:' >&2
+            grep -nF 'Developer ID Application:' scripts/after-pack.js >&2
             exit 1
           fi
 
