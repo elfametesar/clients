@@ -233,108 +233,85 @@ jobs:
         if: ${{ inputs.sdk_branch != '' }}
         run: npm link ../sdk-internal
 
-      - name: Build Safari extension without Apple provisioning
+      - name: Build Safari extension with Xcode local signing
         working-directory: apps/browser
         run: |
           set -euo pipefail
 
-          # Generate the Safari web-extension payload and Xcode projects first.
+          # Build the web-extension payload, then prepare the same generated
+          # Xcode project layout used by package-safari.ps1. Do not disable
+          # Xcode signing and do not post-sign the .appex: Safari development
+          # builds need Xcode's "Sign to Run Locally" signature so the target
+          # entitlements are embedded correctly.
           npm run build:prod:safari
 
-          # Bitwarden's checked-in Xcode project contains its Apple team and
-          # certificate settings. Clear them in both the source and generated
-          # projects so this fork never requests those credentials.
           python3 - <<'PY'
           from pathlib import Path
-          import re
+          import json
+          import shutil
 
-          project_files = sorted(
-              set(Path("src/safari").rglob("project.pbxproj"))
-              | set(Path("dist/Safari").rglob("project.pbxproj"))
-          )
-          if not project_files:
-              raise SystemExit("No Safari Xcode project files were generated")
+          source = Path("src/safari")
+          browser_build = Path("build")
+          destination = Path("dist/Safari/dmg")
 
-          replacements = {
-              "DEVELOPMENT_TEAM": '""',
-              "CODE_SIGN_IDENTITY": '""',
-              "PROVISIONING_PROFILE": '""',
-              "PROVISIONING_PROFILE_SPECIFIER": '""',
-          }
+          if destination.exists():
+              shutil.rmtree(destination)
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copytree(source, destination)
+          shutil.copytree(browser_build, destination / "safari/app")
 
-          for project in project_files:
-              text = project.read_text()
-              for key, value in replacements.items():
-                  text = re.sub(
-                      rf'(?m)^(\s*)("?{re.escape(key)}(?:\[[^]]+\])?"?)\s*=\s*[^;]*;',
-                      rf'\1\2 = {value};',
-                      text,
-                  )
-              project.write_text(text)
-              print(f"Sanitized signing settings in {project}")
+          manifest = json.loads((browser_build / "manifest.json").read_text())
+          version = manifest["version"]
 
-          # We only need the DMG Safari extension. The upstream packaging script
-          # also builds a Mac App Store target and then re-signs every bundled
-          # Swift dylib with Bitwarden's private Apple certificate. Restrict it
-          # to the DMG target and change that post-build identity to ad-hoc.
-          script = Path("scripts/package-safari.ps1")
-          script_text = script.read_text()
-          script_replacements = {
-              '$subBuildPaths = @("mas", "dmg")': '$subBuildPaths = @("dmg")',
-              '\'"Developer ID Application: Bitwarden Inc"\'': '"-"',
-              '\'"3rd Party Mac Developer Application: Bitwarden Inc"\'': '"-"',
-          }
-          for old, new in script_replacements.items():
-              if old not in script_text:
-                  raise SystemExit(f"Expected Safari packaging token not found: {old}")
-              script_text = script_text.replace(old, new)
-          script.write_text(script_text)
-          print("Configured package-safari.ps1 for DMG-only ad-hoc signing")
+          info_plist = destination / "safari/Info.plist"
+          info_text = info_plist.read_text()
+          info_text = info_text.replace("0.0.1", version).replace("0.0.2", version)
+          info_plist.write_text(info_text)
+
+          project = destination / "desktop.xcodeproj/project.pbxproj"
+          project_text = project.read_text().replace("../../../build", "../safari/app")
+          project.write_text(project_text)
+
+          print(f"Prepared Safari Xcode project at {destination}")
           PY
 
-          # package-safari.ps1 invokes xcodebuild for its DMG project. Put a
-          # wrapper first in PATH so compilation itself never performs a
-          # certificate lookup or provisioning. The patched PowerShell script
-          # then ad-hoc signs its dylibs and .appex with codesign --sign -.
-          XCODE_WRAPPER_DIR="$RUNNER_TEMP/xcodebuild-no-provisioning"
-          mkdir -p "$XCODE_WRAPPER_DIR"
-          cat > "$XCODE_WRAPPER_DIR/xcodebuild" <<'SH'
-          #!/bin/bash
-          set -euo pipefail
-          exec /usr/bin/xcodebuild "$@" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            EXPANDED_CODE_SIGN_IDENTITY="" \
+          SAFARI_ROOT="$PWD/dist/Safari/dmg"
+          /usr/bin/xcodebuild \
+            -project "$SAFARI_ROOT/desktop.xcodeproj" \
+            -alltargets \
+            -configuration Release \
+            SYMROOT="$SAFARI_ROOT/build" \
+            OBJROOT="$SAFARI_ROOT/build/Intermediates.noindex" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="-" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
-          SH
-          chmod +x "$XCODE_WRAPPER_DIR/xcodebuild"
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            ENABLE_HARDENED_RUNTIME=NO
 
-          PATH="$XCODE_WRAPPER_DIR:$PATH" ./scripts/package-safari.ps1
-
-      - name: Ad-hoc sign and verify Safari extension
+      - name: Verify Safari local signature and entitlements
         run: |
           set -euo pipefail
+
           APPEX="apps/browser/dist/Safari/dmg/build/Release/safari.appex"
-          ENTITLEMENTS="apps/browser/src/safari/safari/safari.entitlements"
+          HOST="apps/browser/dist/Safari/dmg/build/Release/desktop.app"
           test -d "$APPEX"
-          test -f "$ENTITLEMENTS"
+          test -d "$HOST"
 
-          codesign --remove-signature "$APPEX" 2>/dev/null || true
-          codesign \
-            --force \
-            --deep \
-            --sign - \
-            --timestamp=none \
-            --entitlements "$ENTITLEMENTS" \
-            "$APPEX"
+          codesign --verify --deep --strict --verbose=4 "$HOST"
+          codesign --verify --deep --strict --verbose=4 "$APPEX"
 
-          codesign --verify --deep --strict --verbose=2 "$APPEX"
           codesign -dv --verbose=4 "$APPEX" 2>&1 | tee "$RUNNER_TEMP/safari-signature.txt"
-          grep -q 'Signature=adhoc' "$RUNNER_TEMP/safari-signature.txt"
+          grep -Fq 'Signature=adhoc' "$RUNNER_TEMP/safari-signature.txt"
+
+          codesign -d --entitlements :- "$APPEX" 2>&1 | tee "$RUNNER_TEMP/safari-entitlements.txt"
+          grep -Fq '<key>com.apple.security.app-sandbox</key>' "$RUNNER_TEMP/safari-entitlements.txt"
+          grep -Fq '<key>com.apple.security.network.client</key>' "$RUNNER_TEMP/safari-entitlements.txt"
+          grep -Fq '<key>com.apple.security.network.server</key>' "$RUNNER_TEMP/safari-entitlements.txt"
+
           ditto -c -k --sequesterRsrc --keepParent "$APPEX" safari-extension.zip
 
       - name: Upload Safari extension
@@ -528,10 +505,25 @@ jobs:
             --preserve-metadata=identifier,entitlements,requirements,flags \
             "$APP"
 
+          APPEX="$APP/Contents/PlugIns/safari.appex"
           codesign --verify --deep --strict --verbose=4 "$APP"
-          codesign --verify --deep --strict --verbose=4 "$APP/Contents/PlugIns/safari.appex"
+          codesign --verify --deep --strict --verbose=4 "$APPEX"
           codesign -dv --verbose=4 "$APP" 2>&1
-          codesign -dv --verbose=4 "$APP/Contents/PlugIns/safari.appex" 2>&1
+          codesign -dv --verbose=4 "$APPEX" 2>&1
+
+          codesign -d --entitlements :- "$APPEX" 2>&1 | tee "$RUNNER_TEMP/embedded-safari-entitlements.txt"
+          grep -Fq '<key>com.apple.security.app-sandbox</key>' "$RUNNER_TEMP/embedded-safari-entitlements.txt"
+          grep -Fq '<key>com.apple.security.network.client</key>' "$RUNNER_TEMP/embedded-safari-entitlements.txt"
+
+          # Register the finished host bundle exactly as macOS does after the
+          # containing app is installed. Fail the build unless PlugInKit can
+          # discover the Safari web-extension identifier.
+          LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+          "$LSREGISTER" -f "$APP"
+          pluginkit -a "$APPEX"
+          sleep 2
+          pluginkit -mAvvv -p com.apple.Safari.web-extension 2>&1 | tee "$RUNNER_TEMP/pluginkit-safari.txt"
+          grep -Fq 'com.bitwarden.desktop.safari' "$RUNNER_TEMP/pluginkit-safari.txt"
 
       - name: Create ZIP and DMG artifacts
         run: |
@@ -745,10 +737,25 @@ jobs:
             --preserve-metadata=identifier,entitlements,requirements,flags \
             "$APP"
 
+          APPEX="$APP/Contents/PlugIns/safari.appex"
           codesign --verify --deep --strict --verbose=4 "$APP"
-          codesign --verify --deep --strict --verbose=4 "$APP/Contents/PlugIns/safari.appex"
+          codesign --verify --deep --strict --verbose=4 "$APPEX"
           codesign -dv --verbose=4 "$APP" 2>&1
-          codesign -dv --verbose=4 "$APP/Contents/PlugIns/safari.appex" 2>&1
+          codesign -dv --verbose=4 "$APPEX" 2>&1
+
+          codesign -d --entitlements :- "$APPEX" 2>&1 | tee "$RUNNER_TEMP/embedded-safari-entitlements.txt"
+          grep -Fq '<key>com.apple.security.app-sandbox</key>' "$RUNNER_TEMP/embedded-safari-entitlements.txt"
+          grep -Fq '<key>com.apple.security.network.client</key>' "$RUNNER_TEMP/embedded-safari-entitlements.txt"
+
+          # Register the finished host bundle exactly as macOS does after the
+          # containing app is installed. Fail the build unless PlugInKit can
+          # discover the Safari web-extension identifier.
+          LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+          "$LSREGISTER" -f "$APP"
+          pluginkit -a "$APPEX"
+          sleep 2
+          pluginkit -mAvvv -p com.apple.Safari.web-extension 2>&1 | tee "$RUNNER_TEMP/pluginkit-safari.txt"
+          grep -Fq 'com.bitwarden.desktop.safari' "$RUNNER_TEMP/pluginkit-safari.txt"
 
       - name: Create beta ZIP and DMG artifacts
         run: |
