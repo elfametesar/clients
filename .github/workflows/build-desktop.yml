@@ -423,13 +423,21 @@ jobs:
           jq '
             .forceCodeSigning = false
             | .mac = ((.mac // {}) + {"identity":"-", "hardenedRuntime":false})
-            | del(.mac.provisioningProfile, .mas.provisioningProfile, .afterSign)
+            | .mac.extraFiles = (
+                ([.mac.extraFiles] | flatten | map(select(. != null)))
+                + [{"from":"PlugIns", "to":"PlugIns", "filter":["**/*"]}]
+              )
+            | del(.provisioningProfile, .mac.provisioningProfile, .mas.provisioningProfile, .afterSign)
           ' electron-builder.json > electron-builder.json.tmp
           mv electron-builder.json.tmp electron-builder.json
 
-          # electron-builder treats any configured provisioning profile as a
-          # mandatory Apple signing asset, even when identity is ad-hoc (`-`).
+          # Ad-hoc signing must not load any Apple provisioning profile. The
+          # Safari extension is copied into Contents/PlugIns before signing.
           test "$(jq -r '.mac.provisioningProfile // empty' electron-builder.json)" = ""
+          jq -e '
+            .mac.extraFiles
+            | any(.[]; type == "object" and .from == "PlugIns" and .to == "PlugIns")
+          ' electron-builder.json >/dev/null
 
           # The upstream afterPack hook manually signs desktop_proxy with
           # Bitwarden's private Developer ID certificate, bypassing the
@@ -485,13 +493,26 @@ jobs:
 
       - name: Verify app and bundled extension signatures
         run: |
-          APP=$(find dist -type d -name '*.app' -prune -print | head -n 1)
-          test -n "$APP"
-          test -d "$APP/Contents/PlugIns/safari.appex"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign --verify --deep --strict --verbose=2 "$APP/Contents/PlugIns/safari.appex"
-          codesign -dv --verbose=4 "$APP" 2>&1 | tee "$RUNNER_TEMP/app-signature.txt"
-          grep -q 'Signature=adhoc' "$RUNNER_TEMP/app-signature.txt"
+          set -euo pipefail
+
+          APP=$(find dist/mac-universal -maxdepth 1 -type d -name '*.app' -print -quit)
+          if [[ -z "$APP" ]]; then
+            echo "Packaged macOS app was not found" >&2
+            find dist -maxdepth 3 -print >&2
+            exit 1
+          fi
+
+          APPEX=$(find "$APP/Contents/PlugIns" -maxdepth 1 -type d -name '*.appex' -print -quit 2>/dev/null || true)
+          if [[ -z "$APPEX" ]]; then
+            echo "Safari extension was not bundled into $APP/Contents/PlugIns" >&2
+            find "$APP/Contents" -maxdepth 3 -print >&2
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=4 "$APPEX"
+          codesign --verify --deep --strict --verbose=4 "$APP"
+          codesign -dv --verbose=4 "$APPEX" 2>&1
+          codesign -dv --verbose=4 "$APP" 2>&1
 
       - name: Upload ZIP artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -600,16 +621,27 @@ jobs:
 
           jq '.version = .version + "-beta"' src/package.json > src/package.json.tmp
           mv src/package.json.tmp src/package.json
-          jq '
-            .forceCodeSigning = false
-            | .mac = ((.mac // {}) + {"identity":"-", "hardenedRuntime":false})
-            | del(.mac.provisioningProfile, .mas.provisioningProfile, .afterSign)
-          ' electron-builder.json > electron-builder.json.tmp
-          mv electron-builder.json.tmp electron-builder.json
+          # pack:mac:beta loads electron-builder.beta.json, which can override
+          # the base file. Patch both configs so the beta job cannot reintroduce
+          # Bitwarden's private provisioning profile.
+          for config in electron-builder.json electron-builder.beta.json; do
+            jq '
+              .forceCodeSigning = false
+              | .mac = ((.mac // {}) + {"identity":"-", "hardenedRuntime":false})
+              | .mac.extraFiles = (
+                  ([.mac.extraFiles] | flatten | map(select(. != null)))
+                  + [{"from":"PlugIns", "to":"PlugIns", "filter":["**/*"]}]
+                )
+              | del(.provisioningProfile, .mac.provisioningProfile, .mas.provisioningProfile, .afterSign)
+            ' "$config" > "$config.tmp"
+            mv "$config.tmp" "$config"
 
-          # electron-builder treats any configured provisioning profile as a
-          # mandatory Apple signing asset, even when identity is ad-hoc (`-`).
-          test "$(jq -r '.mac.provisioningProfile // empty' electron-builder.json)" = ""
+            test "$(jq -r '.mac.provisioningProfile // empty' "$config")" = ""
+            jq -e '
+              .mac.extraFiles
+              | any(.[]; type == "object" and .from == "PlugIns" and .to == "PlugIns")
+            ' "$config" >/dev/null
+          done
 
           python3 - <<'PY'
           from pathlib import Path
@@ -650,15 +682,28 @@ jobs:
       - name: Package ad-hoc signed beta
         run: npm run pack:mac:beta
 
-      - name: Verify beta signatures
+      - name: Verify beta app and bundled extension signatures
         run: |
-          APP=$(find dist -type d -name '*.app' -prune -print | head -n 1)
-          test -n "$APP"
-          test -d "$APP/Contents/PlugIns/safari.appex"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign --verify --deep --strict --verbose=2 "$APP/Contents/PlugIns/safari.appex"
-          codesign -dv --verbose=4 "$APP" 2>&1 | tee "$RUNNER_TEMP/app-signature.txt"
-          grep -q 'Signature=adhoc' "$RUNNER_TEMP/app-signature.txt"
+          set -euo pipefail
+
+          APP=$(find dist/mac-universal -maxdepth 1 -type d -name '*.app' -print -quit)
+          if [[ -z "$APP" ]]; then
+            echo "Packaged beta macOS app was not found" >&2
+            find dist -maxdepth 3 -print >&2
+            exit 1
+          fi
+
+          APPEX=$(find "$APP/Contents/PlugIns" -maxdepth 1 -type d -name '*.appex' -print -quit 2>/dev/null || true)
+          if [[ -z "$APPEX" ]]; then
+            echo "Safari extension was not bundled into $APP/Contents/PlugIns" >&2
+            find "$APP/Contents" -maxdepth 3 -print >&2
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=4 "$APPEX"
+          codesign --verify --deep --strict --verbose=4 "$APP"
+          codesign -dv --verbose=4 "$APPEX" 2>&1
+          codesign -dv --verbose=4 "$APP" 2>&1
 
       - name: Upload beta ZIP
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
